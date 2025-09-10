@@ -1,0 +1,1153 @@
+=== SOLUTION ARCHITECTURE BLUEPRINT ===
+
+Device Models and Roles:
+- Core Switch 1: Cisco Nexus 9336C-FX2  - Primary Spine/Core/Multisite VTEP
+- Core Switch 2: Cisco Nexus 9336C-FX2  - Secondary Spine/Core/Multisite VTEP
+- Distribution Switch 1: Cisco Nexus 93180YC-FX3 - Distribution/Leaf
+- Distribution Switch 2: Cisco Nexus 93180YC-FX3 - Distribution/Leaf
+- Access Switch 1: Cisco Nexus 9300-48T - Access Leaf (Site A)
+- Access Switch 2: Cisco Nexus 9300-48T - Access Leaf (Site B)
+- Security Firewall: Cisco Firepower 4110 - Shared Security/Edge Enforcement
+
+Network Topology Description:
+- Dual-homed spine-leaf VXLAN fabric connecting two sites (A and B), supporting multisite VXLAN EVPN for seamless L2/L3 extension.
+- Border/Spine layer forms high-performance, high-availability core using multihomed VTEPs; dual redundant leaves per site with Anycast gateways and OSPF/BGP-EVPN routing.
+- Trunk and routed uplinks with strict P2P IP addressing and robust redundancy; all inter-switch trunks allow all required VLANs for end-to-end segmentation.
+- Out-of-band management network, AAA, centralized logging, strict access controls; comprehensive role-based privilege management.
+
+---
+
+=== DEVICE 1: CORE-SW1 (N9K-9336C-FX2) ===
+
+! ===== SECTION: Basic Configuration =====
+hostname CORE-SW1
+no ip domain-lookup
+username netops privilege 15 secret 0 S3cureNetOps!
+ip domain-name corp-acme.com
+aaa new-model
+aaa authentication login default group radius local
+aaa authorization exec default group radius local
+radius-server host 192.168.200.11 key S3cureKey
+feature bash-shell
+feature nxapi
+feature telnet
+feature radius
+feature tacacs+
+feature interface-vlan
+feature ospf
+feature bgp
+feature nv overlay
+feature vn-segment-vlan-based
+feature lacp
+feature vpc
+feature hsrp
+feature pim
+feature bfd
+feature lldp
+feature password-strength-check
+ip ssh version 2
+service tcp-keepalives-in
+service tcp-keepalives-out
+banner motd #
+ *** Authorized Access Only ***
+ Your actions are monitored and logged.
+#
+
+snmp-server community SECURE_SNMP RO
+snmp-server host 192.168.200.254 version 2c SECURE_SNMP
+
+ntp server 192.168.200.1 use-vrf management
+clock timezone UTC 0 0
+
+logging host 192.168.200.250 use-vrf management
+logging trap informational
+! ===== END SECTION =====
+
+! ===== SECTION: Interface Configuration =====
+interface loopback0
+  description VXLAN EVPN VTEP Loopback
+  ip address 172.16.0.1/32
+
+interface loopback1
+  description BGP Router-ID
+  ip address 10.255.0.1/32
+
+interface mgmt0
+  description OOB Management Interface
+  ip address 192.168.200.10/24
+  no shutdown
+
+interface Ethernet1/1
+  description To CORE-SW2-Eth1/1
+  no switchport
+  ip address 10.10.255.1/30
+  mtu 9216
+
+interface Ethernet1/2
+  description To DIST-SW1-Eth1/1
+  no switchport
+  ip address 10.10.255.5/30
+  mtu 9216
+
+interface Ethernet1/3
+  description To DIST-SW2-Eth1/1
+  no switchport
+  ip address 10.10.255.9/30
+  mtu 9216
+
+interface Ethernet1/10
+  description To Access-SW1-Eth1/1 (Trunk)
+  switchport
+  switchport mode trunk
+  switchport trunk allowed vlan 10,20,100,900,999
+  mtu 9216
+
+interface nve1
+  description VXLAN Tunnel Interface
+  no shutdown
+  source-interface loopback0
+  host-reachability protocol bgp
+  member vni 10010
+    mcast-group 239.1.1.10
+  member vni 10020
+    mcast-group 239.1.1.20
+  member vni 10900
+    mcast-group 239.1.1.90
+  member vni 10999
+    mcast-group 239.1.1.99
+
+vpc domain 1
+  role priority 10
+  peer-keepalive destination 10.10.255.2 source 10.10.255.1 vrf management
+  peer-gateway
+  peer-switch
+
+interface port-channel10
+  description VPC Peer-Link
+  switchport
+  switchport mode trunk
+  mtu 9216
+! Assign interfaces to peer-link
+interface Ethernet1/20
+  channel-group 10 mode active
+  no shutdown
+
+interface Ethernet1/21
+  channel-group 10 mode active
+  no shutdown
+
+! ===== END SECTION =====
+
+! ===== SECTION: VXLAN & VLAN Configuration =====
+vlan 10
+  name User_VLAN
+  vn-segment 10010
+
+vlan 20
+  name Server_VLAN
+  vn-segment 10020
+
+vlan 100
+  name Mgmt_VLAN
+  vn-segment 10900
+
+vlan 900
+  name VXLAN-Multisite-Control
+  vn-segment 10900
+
+vlan 999
+  name Native_VLAN
+  vn-segment 10999
+
+interface Vlan10
+  description User SVI (Anycast GW)
+  ip address 192.168.10.1/24
+  no shutdown
+  hsrp 10
+    ip 192.168.10.254
+    priority 110
+    preempt
+    authentication md5 key-string StrongHRSP10
+
+interface Vlan20
+  description Server SVI (Anycast GW)
+  ip address 192.168.20.1/24
+  no shutdown
+  hsrp 20
+    ip 192.168.20.254
+    priority 110
+    preempt
+    authentication md5 key-string StrongHRSP20
+
+interface Vlan100
+  description Mgmt SVI
+  ip address 192.168.100.1/24
+  no shutdown
+
+interface Vlan900
+  description VXLAN Control VLAN
+  ip address 172.16.90.1/30
+  no shutdown
+
+interface Vlan999
+  description Native VLAN (Quarantine)
+  ip address 192.168.254.1/24
+  no shutdown
+
+! ===== END SECTION =====
+
+! ===== SECTION: Routing Protocols =====
+router ospf 100
+  router-id 10.255.0.1
+  passive-interface default
+  no passive-interface Ethernet1/1
+  no passive-interface Ethernet1/2
+  no passive-interface Ethernet1/3
+  no passive-interface Vlan900
+  network 10.10.255.0 0.0.0.255 area 0.0.0.0
+  network 172.16.90.0 0.0.0.3 area 0.0.0.0
+
+router bgp 65001
+  router-id 10.255.0.1
+  address-family ipv4 unicast
+  network 172.16.0.1 mask 255.255.255.255
+  neighbor 10.255.0.2 remote-as 65001
+    update-source loopback1
+    ebgp-multihop 2
+  neighbor 10.255.0.3 remote-as 65002
+    update-source loopback1
+    ebgp-multihop 2
+  address-family l2vpn evpn
+    neighbor 10.255.0.2 activate
+    neighbor 10.255.0.3 activate
+    neighbor 10.255.0.2 send-community extended
+    neighbor 10.255.0.3 send-community extended
+
+! ===== END SECTION =====
+
+! ===== SECTION: Security & Management =====
+ip access-list extended MGMT_ONLY
+  permit ip host 192.168.200.10 192.168.200.0 0.0.0.255
+  deny   ip any any log
+
+line vty 0 4
+  transport input ssh
+  login local
+  exec-timeout 10 0
+  privilege level 15
+
+logging monitor informational
+logging buffered 40960
+aaa session-id common
+
+macsec enable
+
+service password-encryption
+
+ip route 0.0.0.0/0 172.16.90.2
+
+vtp domain ACME_VXLAN
+vtp mode transparent
+
+copy running-config startup-config
+! ===== END SECTION =====
+
+---
+
+=== DEVICE 2: CORE-SW2 (N9K-9336C-FX2) ===
+
+! ===== SECTION: Basic Configuration =====
+hostname CORE-SW2
+no ip domain-lookup
+username netsec privilege 15 secret 0 S3cureNetSec!
+ip domain-name corp-acme.com
+aaa new-model
+aaa authentication login default group radius local
+aaa authorization exec default group radius local
+radius-server host 192.168.200.11 key S3cureKey
+feature bash-shell
+feature nxapi
+feature telnet
+feature radius
+feature tacacs+
+feature interface-vlan
+feature ospf
+feature bgp
+feature nv overlay
+feature vn-segment-vlan-based
+feature lacp
+feature vpc
+feature hsrp
+feature pim
+feature bfd
+feature lldp
+feature password-strength-check
+ip ssh version 2
+service tcp-keepalives-in
+service tcp-keepalives-out
+banner motd #
+ *** Authorized Access Only ***
+ Your actions are monitored and logged.
+#
+snmp-server community SECURE_SNMP RO
+snmp-server host 192.168.200.254 version 2c SECURE_SNMP
+
+ntp server 192.168.200.1 use-vrf management
+clock timezone UTC 0 0
+
+logging host 192.168.200.250 use-vrf management
+logging trap informational
+! ===== END SECTION =====
+
+! ===== SECTION: Interface Configuration =====
+interface loopback0
+  description VXLAN EVPN VTEP Loopback
+  ip address 172.16.0.2/32
+
+interface loopback1
+  description BGP Router-ID
+  ip address 10.255.0.2/32
+
+interface mgmt0
+  description OOB Management Interface
+  ip address 192.168.200.11/24
+  no shutdown
+
+interface Ethernet1/1
+  description To CORE-SW1-Eth1/1
+  no switchport
+  ip address 10.10.255.2/30
+  mtu 9216
+
+interface Ethernet1/2
+  description To DIST-SW1-Eth1/2
+  no switchport
+  ip address 10.10.255.13/30
+  mtu 9216
+
+interface Ethernet1/3
+  description To DIST-SW2-Eth1/2
+  no switchport
+  ip address 10.10.255.17/30
+  mtu 9216
+
+interface Ethernet1/10
+  description To Access-SW2-Eth1/1 (Trunk)
+  switchport
+  switchport mode trunk
+  switchport trunk allowed vlan 10,20,100,900,999
+  mtu 9216
+
+interface nve1
+  description VXLAN Tunnel Interface
+  no shutdown
+  source-interface loopback0
+  host-reachability protocol bgp
+  member vni 10010
+    mcast-group 239.1.1.10
+  member vni 10020
+    mcast-group 239.1.1.20
+  member vni 10900
+    mcast-group 239.1.1.90
+  member vni 10999
+    mcast-group 239.1.1.99
+
+vpc domain 1
+  role priority 20
+  peer-keepalive destination 10.10.255.1 source 10.10.255.2 vrf management
+  peer-gateway
+  peer-switch
+
+interface port-channel10
+  description VPC Peer-Link
+  switchport
+  switchport mode trunk
+  mtu 9216
+! Assign interfaces to peer-link
+interface Ethernet1/20
+  channel-group 10 mode active
+  no shutdown
+
+interface Ethernet1/21
+  channel-group 10 mode active
+  no shutdown
+
+! ===== END SECTION =====
+
+! ===== SECTION: VXLAN & VLAN Configuration =====
+vlan 10
+  name User_VLAN
+  vn-segment 10010
+
+vlan 20
+  name Server_VLAN
+  vn-segment 10020
+
+vlan 100
+  name Mgmt_VLAN
+  vn-segment 10900
+
+vlan 900
+  name VXLAN-Multisite-Control
+  vn-segment 10900
+
+vlan 999
+  name Native_VLAN
+  vn-segment 10999
+
+interface Vlan10
+  description User SVI (Anycast GW)
+  ip address 192.168.10.2/24
+  no shutdown
+  hsrp 10
+    ip 192.168.10.254
+    priority 100
+    preempt
+    authentication md5 key-string StrongHRSP10
+
+interface Vlan20
+  description Server SVI (Anycast GW)
+  ip address 192.168.20.2/24
+  no shutdown
+  hsrp 20
+    ip 192.168.20.254
+    priority 100
+    preempt
+    authentication md5 key-string StrongHRSP20
+
+interface Vlan100
+  description Mgmt SVI
+  ip address 192.168.100.2/24
+  no shutdown
+
+interface Vlan900
+  description VXLAN Control VLAN
+  ip address 172.16.90.2/30
+  no shutdown
+
+interface Vlan999
+  description Native VLAN (Quarantine)
+  ip address 192.168.254.2/24
+  no shutdown
+
+! ===== END SECTION =====
+
+! ===== SECTION: Routing Protocols =====
+router ospf 100
+  router-id 10.255.0.2
+  passive-interface default
+  no passive-interface Ethernet1/1
+  no passive-interface Ethernet1/2
+  no passive-interface Ethernet1/3
+  no passive-interface Vlan900
+  network 10.10.255.0 0.0.0.255 area 0.0.0.0
+  network 172.16.90.0 0.0.0.3 area 0.0.0.0
+
+router bgp 65001
+  router-id 10.255.0.2
+  address-family ipv4 unicast
+  network 172.16.0.2 mask 255.255.255.255
+  neighbor 10.255.0.1 remote-as 65001
+    update-source loopback1
+    ebgp-multihop 2
+  neighbor 10.255.0.4 remote-as 65002
+    update-source loopback1
+    ebgp-multihop 2
+  address-family l2vpn evpn
+    neighbor 10.255.0.1 activate
+    neighbor 10.255.0.4 activate
+    neighbor 10.255.0.1 send-community extended
+    neighbor 10.255.0.4 send-community extended
+
+! ===== END SECTION =====
+
+! ===== SECTION: Security & Management =====
+ip access-list extended MGMT_ONLY
+  permit ip host 192.168.200.11 192.168.200.0 0.0.0.255
+  deny   ip any any log
+
+line vty 0 4
+  transport input ssh
+  login local
+  exec-timeout 10 0
+  privilege level 15
+
+logging monitor informational
+logging buffered 40960
+aaa session-id common
+
+macsec enable
+
+service password-encryption
+
+ip route 0.0.0.0/0 172.16.90.1
+
+vtp domain ACME_VXLAN
+vtp mode transparent
+
+copy running-config startup-config
+! ===== END SECTION =====
+
+---
+
+=== DEVICE 3: DIST-SW1 (N9K-93180YC-FX3) ===
+
+! ===== SECTION: Basic Configuration =====
+hostname DIST-SW1
+no ip domain-lookup
+username distop privilege 15 secret 0 D1st-S3cret!
+ip domain-name corp-acme.com
+aaa new-model
+aaa authentication login default group radius local
+aaa authorization exec default group radius local
+radius-server host 192.168.200.11 key S3cureKey
+feature interface-vlan
+feature lacp
+feature vpc
+feature ospf
+feature bgp
+feature nv overlay
+feature vn-segment-vlan-based
+feature lldp
+feature bash-shell
+feature password-strength-check
+ip ssh version 2
+service tcp-keepalives-in
+service tcp-keepalives-out
+banner motd #
+  DIST-SW1: Authorized Access Only
+#
+ntp server 192.168.200.1 use-vrf management
+
+snmp-server community DIST_SNMP RO
+snmp-server host 192.168.200.254 version 2c DIST_SNMP
+
+logging host 192.168.200.250 use-vrf management
+! ===== END SECTION =====
+
+! ===== SECTION: VLAN & Trunking =====
+vlan 10
+  name Users
+  vn-segment 10010
+
+vlan 20
+  name Servers
+  vn-segment 10020
+
+vlan 100
+  name Management
+  vn-segment 10900
+
+vlan 900
+  name VXLAN_Msite_CTRL
+  vn-segment 10900
+
+vlan 999
+  name Native_VLAN
+  vn-segment 10999
+
+interface Vlan10
+  ip address 192.168.10.3/24
+  no shutdown
+
+interface Vlan20
+  ip address 192.168.20.3/24
+  no shutdown
+
+interface Vlan100
+  ip address 192.168.100.3/24
+  no shutdown
+
+interface Vlan900
+  ip address 172.16.90.3/30
+  no shutdown
+
+interface Vlan999
+  ip address 192.168.254.3/24
+  no shutdown
+
+! ===== END SECTION =====
+
+! ===== SECTION: Interface Configuration =====
+interface mgmt0
+  ip address 192.168.200.21/24
+
+interface Ethernet1/1
+  description To CORE-SW1-Eth1/2
+  no switchport
+  ip address 10.10.255.6/30
+
+interface Ethernet1/2
+  description To CORE-SW2-Eth1/2
+  no switchport
+  ip address 10.10.255.14/30
+
+interface Ethernet1/3
+  description To DIST-SW2-Eth1/1
+  no switchport
+  ip address 10.10.255.21/30
+
+interface port-channel1
+  description To Access-SW1 Uplinks (Trunk)
+  switchport
+  switchport mode trunk
+  switchport trunk allowed vlan 10,20,100,900,999
+
+interface Ethernet1/10
+  channel-group 1 mode active
+  no shutdown
+
+interface Ethernet1/11
+  channel-group 1 mode active
+  no shutdown
+! ===== END SECTION =====
+
+! ===== SECTION: Layer 3 Routing =====
+router ospf 100
+  router-id 10.255.1.1
+  passive-interface default
+  no passive-interface Ethernet1/1
+  no passive-interface Ethernet1/2
+  no passive-interface Ethernet1/3
+  no passive-interface Vlan10
+  no passive-interface Vlan20
+  no passive-interface Vlan100
+  no passive-interface Vlan900
+  network 10.10.255.4 0.0.0.11 area 0.0.0.0
+  network 192.168.10.0 0.0.0.255 area 0.0.0.0
+  network 192.168.20.0 0.0.0.255 area 0.0.0.0
+
+router bgp 65001
+  router-id 10.255.1.1
+  neighbor 10.255.1.2 remote-as 65001
+    update-source Vlan100
+  address-family l2vpn evpn
+    neighbor 10.255.1.2 activate
+    neighbor 10.255.1.2 send-community extended
+
+! ===== END SECTION =====
+
+! ===== SECTION: Security & Management =====
+ip access-list extended MGMT_ACCESS
+  permit ip host 192.168.200.21 192.168.200.0 0.0.0.255
+  deny   ip any any log
+
+line vty 0 4
+  transport input ssh
+  login local
+  exec-timeout 10 0
+  privilege level 15
+
+logging monitor informational
+logging buffered 40960
+service password-encryption
+
+vtp domain ACME_VXLAN
+vtp mode transparent
+
+copy running-config startup-config
+! ===== END SECTION =====
+
+---
+
+=== DEVICE 4: DIST-SW2 (N9K-93180YC-FX3) ===
+
+! ===== SECTION: Basic Configuration =====
+hostname DIST-SW2
+no ip domain-lookup
+username distsec privilege 15 secret 0 D1st2-S3cret!
+ip domain-name corp-acme.com
+aaa new-model
+aaa authentication login default group radius local
+aaa authorization exec default group radius local
+radius-server host 192.168.200.11 key S3cureKey
+feature interface-vlan
+feature lacp
+feature vpc
+feature ospf
+feature bgp
+feature nv overlay
+feature vn-segment-vlan-based
+feature lldp
+feature bash-shell
+feature password-strength-check
+ip ssh version 2
+service tcp-keepalives-in
+service tcp-keepalives-out
+banner motd #
+  DIST-SW2: Authorized Access Only
+#
+ntp server 192.168.200.1 use-vrf management
+
+snmp-server community DIST_SNMP RO
+snmp-server host 192.168.200.254 version 2c DIST_SNMP
+
+logging host 192.168.200.250 use-vrf management
+! ===== END SECTION =====
+
+! ===== SECTION: VLAN & Trunking =====
+vlan 10
+  name Users
+  vn-segment 10010
+
+vlan 20
+  name Servers
+  vn-segment 10020
+
+vlan 100
+  name Management
+  vn-segment 10900
+
+vlan 900
+  name VXLAN_Msite_CTRL
+  vn-segment 10900
+
+vlan 999
+  name Native_VLAN
+  vn-segment 10999
+
+interface Vlan10
+  ip address 192.168.10.4/24
+  no shutdown
+
+interface Vlan20
+  ip address 192.168.20.4/24
+  no shutdown
+
+interface Vlan100
+  ip address 192.168.100.4/24
+  no shutdown
+
+interface Vlan900
+  ip address 172.16.90.4/30
+  no shutdown
+
+interface Vlan999
+  ip address 192.168.254.4/24
+  no shutdown
+
+! ===== END SECTION =====
+
+! ===== SECTION: Interface Configuration =====
+interface mgmt0
+  ip address 192.168.200.22/24
+
+interface Ethernet1/1
+  description To CORE-SW1-Eth1/3
+  no switchport
+  ip address 10.10.255.10/30
+
+interface Ethernet1/2
+  description To CORE-SW2-Eth1/3
+  no switchport
+  ip address 10.10.255.18/30
+
+interface Ethernet1/3
+  description To DIST-SW1-Eth1/3
+  no switchport
+  ip address 10.10.255.22/30
+
+interface port-channel1
+  description To Access-SW2 Uplinks (Trunk)
+  switchport
+  switchport mode trunk
+  switchport trunk allowed vlan 10,20,100,900,999
+
+interface Ethernet1/10
+  channel-group 1 mode active
+  no shutdown
+
+interface Ethernet1/11
+  channel-group 1 mode active
+  no shutdown
+! ===== END SECTION =====
+
+! ===== SECTION: Layer 3 Routing =====
+router ospf 100
+  router-id 10.255.2.1
+  passive-interface default
+  no passive-interface Ethernet1/1
+  no passive-interface Ethernet1/2
+  no passive-interface Ethernet1/3
+  no passive-interface Vlan10
+  no passive-interface Vlan20
+  no passive-interface Vlan100
+  no passive-interface Vlan900
+  network 10.10.255.8 0.0.0.11 area 0.0.0.0
+  network 192.168.10.0 0.0.0.255 area 0.0.0.0
+  network 192.168.20.0 0.0.0.255 area 0.0.0.0
+
+router bgp 65001
+  router-id 10.255.2.1
+  neighbor 10.255.2.2 remote-as 65001
+    update-source Vlan100
+  address-family l2vpn evpn
+    neighbor 10.255.2.2 activate
+    neighbor 10.255.2.2 send-community extended
+
+! ===== END SECTION =====
+
+! ===== SECTION: Security & Management =====
+ip access-list extended MGMT_ACCESS
+  permit ip host 192.168.200.22 192.168.200.0 0.0.0.255
+  deny   ip any any log
+
+line vty 0 4
+  transport input ssh
+  login local
+  exec-timeout 10 0
+  privilege level 15
+
+logging monitor informational
+logging buffered 40960
+service password-encryption
+
+vtp domain ACME_VXLAN
+vtp mode transparent
+
+copy running-config startup-config
+! ===== END SECTION =====
+
+---
+
+=== DEVICE 5: ACCESS-SW1 (N9K-9300-48T) ===
+
+! ===== SECTION: Basic Configuration =====
+hostname ACCESS-SW1
+no ip domain-lookup
+username acc1 privilege 15 secret 0 Acc-SW1S3cret!
+ip domain-name corp-acme.com
+aaa new-model
+aaa authentication login default group radius local
+aaa authorization exec default group radius local
+feature interface-vlan
+feature lacp
+feature lldp
+feature password-strength-check
+feature dot1x
+ip ssh version 2
+service tcp-keepalives-in
+service tcp-keepalives-out
+banner motd #
+  ACCESS SWITCH 1: Authorized Access
+#
+ntp server 192.168.200.1 use-vrf management
+snmp-server community ACCESS_SNMP RO
+snmp-server host 192.168.200.254 version 2c ACCESS_SNMP
+logging host 192.168.200.250 use-vrf management
+! ===== END SECTION =====
+
+! ===== SECTION: VLAN Configuration =====
+vlan 10
+  name SiteA_User
+vlan 20
+  name SiteA_Server
+vlan 100
+  name Management
+vlan 900
+  name SiteA_VXLAN_CTRL
+vlan 999
+  name Native
+
+interface Vlan10
+  ip address 192.168.10.5/24
+  no shutdown
+
+interface Vlan20
+  ip address 192.168.20.5/24
+  no shutdown
+
+interface Vlan100
+  ip address 192.168.100.5/24
+  no shutdown
+! ===== END SECTION =====
+
+! ===== SECTION: Interface Configuration =====
+interface mgmt0
+  ip address 192.168.200.31/24
+
+interface port-channel1
+  switchport
+  switchport mode trunk
+  switchport trunk allowed vlan 10,20,100,900,999
+
+interface Ethernet1/1
+  description To CORE-SW1-Eth1/10
+  channel-group 1 mode active
+  no shutdown
+
+interface Ethernet1/2
+  description To DIST-SW1 (Trunk)
+  channel-group 1 mode active
+  no shutdown
+
+interface range Ethernet1/5-48
+  switchport mode access
+  switchport access vlan 10
+  spanning-tree portfast
+  spanning-tree bpduguard enable
+  authentication port-control auto
+  dot1x pae authenticator
+  spanning-tree bpdufilter enable
+
+interface Ethernet1/4
+  switchport mode access
+  switchport access vlan 20
+  authentication port-control auto
+  dot1x pae authenticator
+! ===== END SECTION =====
+
+! ===== SECTION: Security & Management =====
+ip access-list extended MGMT_SWITCH
+  permit ip host 192.168.200.31 192.168.200.0 0.0.0.255
+  deny   ip any any log
+
+line vty 0 4
+  transport input ssh
+  login local
+  exec-timeout 5 0
+  privilege level 15
+
+logging monitor informational
+logging buffered 10240
+
+service password-encryption
+
+dot1x system-auth-control
+
+copy running-config startup-config
+! ===== END SECTION =====
+
+---
+
+=== DEVICE 6: ACCESS-SW2 (N9K-9300-48T) ===
+
+! ===== SECTION: Basic Configuration =====
+hostname ACCESS-SW2
+no ip domain-lookup
+username acc2 privilege 15 secret 0 Acc-SW2S3cret!
+ip domain-name corp-acme.com
+aaa new-model
+aaa authentication login default group radius local
+aaa authorization exec default group radius local
+feature interface-vlan
+feature lacp
+feature lldp
+feature password-strength-check
+feature dot1x
+ip ssh version 2
+service tcp-keepalives-in
+service tcp-keepalives-out
+banner motd #
+  ACCESS SWITCH 2: Authorized Access
+#
+ntp server 192.168.200.1 use-vrf management
+snmp-server community ACCESS_SNMP RO
+snmp-server host 192.168.200.254 version 2c ACCESS_SNMP
+logging host 192.168.200.250 use-vrf management
+! ===== END SECTION =====
+
+! ===== SECTION: VLAN Configuration =====
+vlan 10
+  name SiteB_User
+vlan 20
+  name SiteB_Server
+vlan 100
+  name Management
+vlan 900
+  name SiteB_VXLAN_CTRL
+vlan 999
+  name Native
+
+interface Vlan10
+  ip address 192.168.10.6/24
+  no shutdown
+
+interface Vlan20
+  ip address 192.168.20.6/24
+  no shutdown
+
+interface Vlan100
+  ip address 192.168.100.6/24
+  no shutdown
+! ===== END SECTION =====
+
+! ===== SECTION: Interface Configuration =====
+interface mgmt0
+  ip address 192.168.200.32/24
+
+interface port-channel1
+  switchport
+  switchport mode trunk
+  switchport trunk allowed vlan 10,20,100,900,999
+
+interface Ethernet1/1
+  description To CORE-SW2-Eth1/10
+  channel-group 1 mode active
+  no shutdown
+
+interface Ethernet1/2
+  description To DIST-SW2 (Trunk)
+  channel-group 1 mode active
+  no shutdown
+
+interface range Ethernet1/5-48
+  switchport mode access
+  switchport access vlan 10
+  spanning-tree portfast
+  spanning-tree bpduguard enable
+  authentication port-control auto
+  dot1x pae authenticator
+  spanning-tree bpdufilter enable
+
+interface Ethernet1/4
+  switchport mode access
+  switchport access vlan 20
+  authentication port-control auto
+  dot1x pae authenticator
+! ===== END SECTION =====
+
+! ===== SECTION: Security & Management =====
+ip access-list extended MGMT_SWITCH
+  permit ip host 192.168.200.32 192.168.200.0 0.0.0.255
+  deny   ip any any log
+
+line vty 0 4
+  transport input ssh
+  login local
+  exec-timeout 5 0
+  privilege level 15
+
+logging monitor informational
+logging buffered 10240
+
+service password-encryption
+
+dot1x system-auth-control
+
+copy running-config startup-config
+! ===== END SECTION =====
+
+---
+
+=== DEVICE 7: FIREWALL-EDGE (FPR4110) ===
+
+! ===== SECTION: Basic Configuration =====
+hostname FIREWALL-EDGE
+ip domain-name corp-acme.com
+username firewalladmin privilege 15 secret 0 F1r3wallEdge!
+aaa new-model
+aaa authentication login default group radius local
+aaa authorization exec default group radius local
+radius-server host 192.168.200.11 key S3cureKey
+snmp-server community FIREWALLSNMP RO
+snmp-server host 192.168.200.254 version 2c FIREWALLSNMP
+logging host 192.168.200.250 use-vrf management
+ntp server 192.168.200.1 use-vrf management
+service password-encryption
+clock timezone UTC 0 0
+! ===== END SECTION =====
+
+! ===== SECTION: Interface Configuration =====
+interface Mgmt0/0
+  nameif management
+  security-level 100
+  ip address 192.168.200.100 255.255.255.0
+  no shutdown
+
+interface TenGigabitEthernet1/1
+  nameif outside
+  security-level 0
+  ip address 203.0.113.1 255.255.255.252
+  no shutdown
+
+interface TenGigabitEthernet1/2
+  nameif inside
+  security-level 100
+  ip address 172.16.90.5 255.255.255.252
+  no shutdown
+
+interface TenGigabitEthernet1/3
+  nameif multisite-vxlan-dci
+  security-level 50
+  ip address 192.0.2.1 255.255.255.252
+  no shutdown
+! ===== END SECTION =====
+
+! ===== SECTION: Security Policy & Logging =====
+access-list OUTSIDE-IN extended permit ip any host 203.0.113.1
+access-list INSIDE-OUT extended permit ip any any
+
+access-group OUTSIDE-IN in interface outside
+access-group INSIDE-OUT out interface inside
+
+aaa-server RADIUS-SERVER protocol radius
+aaa-server RADIUS-SERVER (management) host 192.168.200.11 key S3cureKey
+aaa authentication ssh console RADIUS-SERVER LOCAL
+
+logging buffered informational
+logging trap informational
+
+crypto ikev2 enable outside
+crypto ikev2 policy 10
+ encryption aes-256
+ integrity sha256
+ group 21
+ prf sha256
+ lifetime seconds 86400
+
+crypto ipsec ikev2 ipsec-proposal SECURE
+ protocol esp encryption aes-256
+ protocol esp integrity sha-256
+
+crypto map OUTSIDE-MAP 10 match address OUTSIDE-IN
+crypto map OUTSIDE-MAP 10 set pfs group21
+crypto map OUTSIDE-MAP 10 set peer 203.0.113.2
+crypto map OUTSIDE-MAP 10 set ikev2 ipsec-proposal SECURE
+crypto map OUTSIDE-MAP 10 set security-association lifetime seconds 86400
+crypto map OUTSIDE-MAP interface outside
+
+line vty 0 4
+  transport input ssh
+  login local
+  exec-timeout 5 0
+  privilege level 15
+
+service tcp-keepalives-in
+
+copy running-config startup-config
+! ===== END SECTION =====
+
+---
+
+=== DEPLOYMENT RECOMMENDATIONS ===
+
+Installation Sequence:
+1. Deploy Core Nexus spines (CORE-SW1, CORE-SW2); ensure OOB, loopback, OSPF/BGP, NVE, and vPC.
+2. Deploy Distribution layer (DIST-SW1, DIST-SW2); uplinks, SVI, routing, and trunks to Core and Access.
+3. Deploy Access layer (ACCESS-SW1, ACCESS-SW2); OOB, trunks, config port security, dot1x, user VLANs.
+4. Deploy Firewall Edge; configure all interfaces, policies, and connect to VXLAN multisite DCI.
+5. Bring up each device in order, confirm each layer before progressing.
+
+Verification Procedures:
+- show interface status
+- show vlan
+- show ip ospf neighbor
+- show ip bgp summary
+- show nve peers
+- show vpc brief
+- show spanning-tree
+- show running-config | inc aaa|radius|tacacs|crypto
+- show access-lists
+- show logging
+- Test user and server connectivity (ping, traceroute)
+- AAA authentication test
+- VXLAN VNI and EVPN route distribution test
+
+=== DEPLOYMENT SUCCESS CRITERIA ===
+
+✓ CONNECTIVITY: End-to-end IP/VXLAN Layer 2/3 connectivity; OSPF and BGP neighbor adjacency on all routers/switches.
+✓ ROUTING: EVPN-L2VNI and L3VNI route convergence, proper reachability across sites, no routing leaks.
+✓ SECURITY: AAA and RBAC enforced, logging enabled, ACL operational, edge segmentation functional.
+✓ MANAGEMENT: SSH, SNMP, NTP operational from management subnet; logging/alert verified on SIEM.
+✓ REDUNDANCY: Multi-device, dual-uplink, vPC/HSRP failover validation, BGP/OSPF redundancy and convergence.
